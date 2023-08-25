@@ -27,6 +27,9 @@ networkstatus_t *networkstatus_parse_vote_from_string(const char *s,
                                            size_t len,
                                            const char **eos_out,
                                            enum networkstatus_type_t ns_type);
+networkstatus_t *networkstatus_parse_msg_from_string(
+    const char *s, size_t s_len, const char **eos_out,
+    enum networkstatus_type_t ns_type, smartlist_t *a_voters);
 
 #ifdef NS_PARSE_PRIVATE
 STATIC int routerstatus_parse_guardfraction(const char *guardfraction_str,

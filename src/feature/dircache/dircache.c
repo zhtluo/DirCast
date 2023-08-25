@@ -17,6 +17,7 @@
 #include "core/mainloop/connection.h"
 #include "core/or/relay.h"
 #include "feature/dirauth/dirvote.h"
+#include "feature/dirauth/dirvote_con.h"
 #include "feature/dirauth/authmode.h"
 #include "feature/dirauth/process_descs.h"
 #include "feature/dircache/conscache.h"
@@ -1654,16 +1655,33 @@ directory_handle_command_post,(dir_connection_t *conn, const char *headers,
   if (authdir_mode_v3(options) &&
       !strcmp(url,"/tor/post/vote")) { /* v3 networkstatus vote */
     const char *msg = "OK";
-    int status;
-    if (dirvote_add_vote(body, approx_time(), TO_CONN(conn)->address,
-                         &msg, &status)) {
-      write_short_http_response(conn, status, "Vote stored");
+    int status = 200;
+    int cache_status;
+    if (tor_memstr(body, strlen(body), "network-msg")) {
+      cache_status = dirvote_notify_vote(body, &msg);
     } else {
-      tor_assert(msg);
-      log_warn(LD_DIRSERV, "Rejected vote from %s (\"%s\").",
-               connection_describe_peer(TO_CONN(conn)),
-               msg);
+      cache_status = dirvote_cache_vote(body, &msg);
+    }
+    if (cache_status == -1) {
+      log_warn(LD_DIRSERV, "Cache rejected vote from %s (\"%s\").",
+              connection_describe_peer(TO_CONN(conn)),
+              msg);
       write_short_http_response(conn, status, msg);
+    } else {
+      if (cache_status == 1) {
+        if (dirvote_add_vote(body, approx_time(), TO_CONN(conn)->address,
+                            &msg, &status)) {
+          write_short_http_response(conn, status, "Vote stored");
+        } else {
+          tor_assert(msg);
+          log_warn(LD_DIRSERV, "Rejected vote from %s (\"%s\").",
+                  connection_describe_peer(TO_CONN(conn)),
+                  msg);
+          write_short_http_response(conn, status, msg);
+        }
+      } else {
+        write_short_http_response(conn, status, "Vote stored");
+      }
     }
     goto done;
   }

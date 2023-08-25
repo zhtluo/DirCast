@@ -11,33 +11,33 @@
 
 #define NS_PARSE_PRIVATE
 
-#include "core/or/or.h"
 #include "app/config/config.h"
+#include "core/or/or.h"
 #include "core/or/protover.h"
 #include "core/or/versions.h"
 #include "feature/client/entrynodes.h"
 #include "feature/dirauth/dirvote.h"
+#include "feature/dirauth/vote_microdesc_hash_st.h"
+#include "feature/dirparse/authcert_members.h"
 #include "feature/dirparse/authcert_parse.h"
-#include "feature/dirparse/ns_parse.h"
 #include "feature/dirparse/parsecommon.h"
 #include "feature/dirparse/routerparse.h"
 #include "feature/dirparse/sigcommon.h"
 #include "feature/dirparse/unparseable.h"
 #include "feature/hs_common/shared_random_client.h"
 #include "feature/nodelist/authcert.h"
+#include "feature/nodelist/authority_cert_st.h"
 #include "feature/nodelist/describe.h"
+#include "feature/nodelist/document_signature_st.h"
 #include "feature/nodelist/networkstatus.h"
+#include "feature/nodelist/networkstatus_st.h"
+#include "feature/nodelist/networkstatus_voter_info_st.h"
 #include "feature/nodelist/nickname.h"
+#include "feature/nodelist/vote_routerstatus_st.h"
 #include "lib/crypt_ops/crypto_format.h"
 #include "lib/memarea/memarea.h"
 
-#include "feature/dirauth/vote_microdesc_hash_st.h"
-#include "feature/nodelist/authority_cert_st.h"
-#include "feature/nodelist/document_signature_st.h"
-#include "feature/nodelist/networkstatus_st.h"
-#include "feature/nodelist/networkstatus_voter_info_st.h"
-#include "feature/nodelist/vote_routerstatus_st.h"
-#include "feature/dirparse/authcert_members.h"
+#include "feature/dirparse/ns_parse.h"
 
 #undef log
 #include <math.h>
@@ -150,81 +150,81 @@ static token_rule_t networkstatus_vote_footer_token_table[] = {
   T01("directory-footer",    K_DIRECTORY_FOOTER,    NO_ARGS,   NO_OBJ ),
   T01("bandwidth-weights",   K_BW_WEIGHTS,          ARGS,      NO_OBJ ),
   T(  "directory-signature", K_DIRECTORY_SIGNATURE, GE(2),     NEED_OBJ ),
+  T(  "dir-source",          K_DIR_SOURCE,          GE(6),   NO_OBJ ),
+  T(  "contact",             K_CONTACT,         CONCAT_ARGS, NO_OBJ ),
   END_OF_TABLE
 };
 // clang-format on
 
+/** List of tokens recognized in the footer of v1 directory msg footers. */
+// clang-format off
+static token_rule_t networkstatus_msg_footer_token_table[] = {
+  T01("directory-msg",    K_DIRECTORY_FOOTER,    CONCAT_ARGS,   NO_OBJ ),
+  T(  "directory-signature", K_DIRECTORY_SIGNATURE, GE(2),     NEED_OBJ ),
+  T(  "dir-source",          K_DIR_SOURCE,          GE(6),   NO_OBJ ),
+  T(  "contact",             K_CONTACT,         CONCAT_ARGS, NO_OBJ ),
+  END_OF_TABLE
+};
+
+// clang-format on
 /** Try to find the start and end of the signed portion of a networkstatus
  * document in <b>s</b>. On success, set <b>start_out</b> to the first
  * character of the document, and <b>end_out</b> to a position one after the
  * final character of the signed document, and return 0.  On failure, return
  * -1. */
-int
-router_get_networkstatus_v3_signed_boundaries(const char *s,
-                                              size_t len,
-                                              const char **start_out,
-                                              const char **end_out)
-{
-  return router_get_hash_impl_helper(s, len,
-                                     "network-status-version",
-                                     "\ndirectory-signature",
-                                     ' ', LOG_INFO,
+int router_get_networkstatus_v3_signed_boundaries(const char *s, size_t len,
+                                                  const char **start_out,
+                                                  const char **end_out) {
+  return router_get_hash_impl_helper(s, len, "network-status-version",
+                                     "\ndirectory-signature", ' ', LOG_INFO,
                                      start_out, end_out);
 }
 
 /** Set <b>digest_out</b> to the SHA3-256 digest of the signed portion of the
  * networkstatus vote in <b>s</b> -- or of the entirety of <b>s</b> if no
  * signed portion can be identified.  Return 0 on success, -1 on failure. */
-int
-router_get_networkstatus_v3_sha3_as_signed(uint8_t *digest_out,
-                                           const char *s, size_t len)
-{
+int router_get_networkstatus_v3_sha3_as_signed(uint8_t *digest_out,
+                                               const char *s, size_t len) {
   const char *start, *end;
-  if (router_get_networkstatus_v3_signed_boundaries(s, len,
-                                                    &start, &end) < 0) {
+  if (router_get_networkstatus_v3_signed_boundaries(s, len, &start, &end) < 0) {
     start = s;
     end = s + len;
   }
   tor_assert(start);
   tor_assert(end);
-  return crypto_digest256((char*)digest_out, start, end-start,
+  return crypto_digest256((char *)digest_out, start, end - start,
                           DIGEST_SHA3_256);
 }
 
 /** Set <b>digests</b> to all the digests of the consensus document in
  * <b>s</b> */
-int
-router_get_networkstatus_v3_hashes(const char *s, size_t len,
-                                   common_digests_t *digests)
-{
-  return router_get_hashes_impl(s, len, digests,
-                                "network-status-version",
-                                "\ndirectory-signature",
-                                ' ');
+int router_get_networkstatus_v3_hashes(const char *s, size_t len,
+                                       common_digests_t *digests) {
+  return router_get_hashes_impl(s, len, digests, "network-status-version",
+                                "\ndirectory-signature", ' ');
 }
 
 /** Helper: given a string <b>s</b>, return the start of the next router-status
  * object (starting with "r " at the start of a line).  If none is found,
  * return the start of the directory footer, or the next directory signature.
  * If none is found, return the end of the string. */
-static inline const char *
-find_start_of_next_routerstatus(const char *s, const char *s_eos)
-{
+static inline const char *find_start_of_next_routerstatus(const char *s,
+                                                          const char *s_eos) {
   const char *eos, *footer, *sig;
   if ((eos = tor_memstr(s, s_eos - s, "\nr ")))
     ++eos;
   else
     eos = s_eos;
 
-  footer = tor_memstr(s, eos-s, "\ndirectory-footer");
-  sig = tor_memstr(s, eos-s, "\ndirectory-signature");
+  footer = tor_memstr(s, eos - s, "\ndirectory-footer");
+  sig = tor_memstr(s, eos - s, "\ndirectory-signature");
 
   if (footer && sig)
     return MIN(footer, sig) + 1;
   else if (footer)
-    return footer+1;
+    return footer + 1;
   else if (sig)
-    return sig+1;
+    return sig + 1;
   else
     return eos;
 }
@@ -234,12 +234,10 @@ find_start_of_next_routerstatus(const char *s, const char *s_eos)
  *  If <b>vote</b> or <b>vote_rs</b> are set the document getting
  *  parsed is a vote routerstatus. Otherwise it's a consensus. This is
  *  the same semantic as in routerstatus_parse_entry_from_string(). */
-STATIC int
-routerstatus_parse_guardfraction(const char *guardfraction_str,
-                                 networkstatus_t *vote,
-                                 vote_routerstatus_t *vote_rs,
-                                 routerstatus_t *rs)
-{
+STATIC int routerstatus_parse_guardfraction(const char *guardfraction_str,
+                                            networkstatus_t *vote,
+                                            vote_routerstatus_t *vote_rs,
+                                            routerstatus_t *rs) {
   int ok;
   const char *end_of_header = NULL;
   int is_consensus = !vote_rs;
@@ -258,16 +256,16 @@ routerstatus_parse_guardfraction(const char *guardfraction_str,
     return -1;
   }
 
-  guardfraction = (uint32_t)tor_parse_ulong(end_of_header+1,
-                                            10, 0, 100, &ok, NULL);
+  guardfraction =
+      (uint32_t)tor_parse_ulong(end_of_header + 1, 10, 0, 100, &ok, NULL);
   if (!ok) {
     log_warn(LD_DIR, "Invalid GuardFraction %s", escaped(guardfraction_str));
     return -1;
   }
 
   log_debug(LD_GENERAL, "[*] Parsed %s guardfraction '%s' for '%s'.",
-            is_consensus ? "consensus" : "vote",
-            guardfraction_str, rs->nickname);
+            is_consensus ? "consensus" : "vote", guardfraction_str,
+            rs->nickname);
 
   if (!is_consensus) { /* We are parsing a vote */
     vote_rs->status.guardfraction_percentage = guardfraction;
@@ -278,8 +276,10 @@ routerstatus_parse_guardfraction(const char *guardfraction_str,
       rs->guardfraction_percentage = guardfraction;
       rs->has_guardfraction = 1;
     } else {
-      log_warn(LD_BUG, "Got GuardFraction for non-guard %s. "
-               "This is not supposed to happen. Not applying. ", rs->nickname);
+      log_warn(LD_BUG,
+               "Got GuardFraction for non-guard %s. "
+               "This is not supposed to happen. Not applying. ",
+               rs->nickname);
     }
   }
 
@@ -300,31 +300,25 @@ routerstatus_parse_guardfraction(const char *guardfraction_str,
  *
  * Parse according to the syntax used by the consensus flavor <b>flav</b>.
  **/
-STATIC routerstatus_t *
-routerstatus_parse_entry_from_string(memarea_t *area,
-                                     const char **s, const char *s_eos,
-                                     smartlist_t *tokens,
-                                     networkstatus_t *vote,
-                                     vote_routerstatus_t *vote_rs,
-                                     int consensus_method,
-                                     consensus_flavor_t flav)
-{
+STATIC routerstatus_t *routerstatus_parse_entry_from_string(
+    memarea_t *area, const char **s, const char *s_eos, smartlist_t *tokens,
+    networkstatus_t *vote, vote_routerstatus_t *vote_rs, int consensus_method,
+    consensus_flavor_t flav) {
   const char *eos, *s_dup = *s;
   routerstatus_t *rs = NULL;
   directory_token_t *tok;
-  char timebuf[ISO_TIME_LEN+1];
+  char timebuf[ISO_TIME_LEN + 1];
   struct in_addr in;
   int offset = 0;
   tor_assert(tokens);
   tor_assert(bool_eq(vote, vote_rs));
 
-  if (!consensus_method)
-    flav = FLAV_NS;
+  if (!consensus_method) flav = FLAV_NS;
   tor_assert(flav == FLAV_NS || flav == FLAV_MICRODESC);
 
   eos = find_start_of_next_routerstatus(*s, s_eos);
 
-  if (tokenize_string(area,*s, eos, tokens, rtrstatus_token_table,0)) {
+  if (tokenize_string(area, *s, eos, tokens, rtrstatus_token_table, 0)) {
     log_warn(LD_DIR, "Error tokenizing router status");
     goto err;
   }
@@ -350,8 +344,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   }
 
   if (!is_legal_nickname(tok->args[0])) {
-    log_warn(LD_DIR,
-             "Invalid nickname %s in router status; skipping.",
+    log_warn(LD_DIR, "Invalid nickname %s in router status; skipping.",
              escaped(tok->args[0]));
     goto err;
   }
@@ -372,28 +365,26 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   }
 
   time_t published_on;
-  if (tor_snprintf(timebuf, sizeof(timebuf), "%s %s",
-                   tok->args[3+offset], tok->args[4+offset]) < 0 ||
-      parse_iso_time(timebuf, &published_on)<0) {
+  if (tor_snprintf(timebuf, sizeof(timebuf), "%s %s", tok->args[3 + offset],
+                   tok->args[4 + offset]) < 0 ||
+      parse_iso_time(timebuf, &published_on) < 0) {
     log_warn(LD_DIR, "Error parsing time '%s %s' [%d %d]",
-             tok->args[3+offset], tok->args[4+offset],
-             offset, (int)flav);
+             tok->args[3 + offset], tok->args[4 + offset], offset, (int)flav);
     goto err;
   }
-  if (vote_rs)
-    vote_rs->published_on = published_on;
+  if (vote_rs) vote_rs->published_on = published_on;
 
-  if (tor_inet_aton(tok->args[5+offset], &in) == 0) {
+  if (tor_inet_aton(tok->args[5 + offset], &in) == 0) {
     log_warn(LD_DIR, "Error parsing router address in network-status %s",
-             escaped(tok->args[5+offset]));
+             escaped(tok->args[5 + offset]));
     goto err;
   }
   tor_addr_from_in(&rs->ipv4_addr, &in);
 
-  rs->ipv4_orport = (uint16_t) tor_parse_long(tok->args[6+offset],
-                                              10,0,65535,NULL,NULL);
-  rs->ipv4_dirport = (uint16_t) tor_parse_long(tok->args[7+offset],
-                                               10,0,65535,NULL,NULL);
+  rs->ipv4_orport =
+      (uint16_t)tor_parse_long(tok->args[6 + offset], 10, 0, 65535, NULL, NULL);
+  rs->ipv4_dirport =
+      (uint16_t)tor_parse_long(tok->args[7 + offset], 10, 0, 65535, NULL, NULL);
 
   {
     smartlist_t *a_lines = find_all_by_keyword(tokens, K_A);
@@ -407,10 +398,10 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   if (tok && vote) {
     int i;
     vote_rs->flags = 0;
-    for (i=0; i < tok->n_args; ++i) {
+    for (i = 0; i < tok->n_args; ++i) {
       int p = smartlist_string_pos(vote->known_flags, tok->args[i]);
       if (p >= 0) {
-        vote_rs->flags |= (UINT64_C(1)<<p);
+        vote_rs->flags |= (UINT64_C(1) << p);
       } else {
         log_warn(LD_DIR, "Flags line had a flag %s not listed in known_flags.",
                  escaped(tok->args[i]));
@@ -420,7 +411,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   } else if (tok) {
     /* This is a consensus, not a vote. */
     int i;
-    for (i=0; i < tok->n_args; ++i) {
+    for (i = 0; i < tok->n_args; ++i) {
       if (!strcmp(tok->args[i], "Exit"))
         rs->is_exit = 1;
       else if (!strcmp(tok->args[i], "Stable"))
@@ -441,8 +432,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         rs->is_middle_only = 1;
       else if (!strcmp(tok->args[i], "Authority"))
         rs->is_authority = 1;
-      else if (!strcmp(tok->args[i], "Unnamed") &&
-               consensus_method >= 2) {
+      else if (!strcmp(tok->args[i], "Unnamed") && consensus_method >= 2) {
         /* Unnamed is computed right by consensus method 2 and later. */
         rs->is_unnamed = 1;
       } else if (!strcmp(tok->args[i], "HSDir")) {
@@ -458,7 +448,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
     /* These are implied true by having been included in a consensus made
      * with a given method */
     rs->is_flagged_running = 1; /* Starting with consensus method 4. */
-    rs->is_valid = 1; /* Starting with consensus method 24. */
+    rs->is_valid = 1;           /* Starting with consensus method 24. */
   }
   {
     const char *protocols = NULL, *version = NULL;
@@ -484,13 +474,11 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   /* handle weighting/bandwidth info */
   if ((tok = find_opt_by_keyword(tokens, K_W))) {
     int i;
-    for (i=0; i < tok->n_args; ++i) {
+    for (i = 0; i < tok->n_args; ++i) {
       if (!strcmpstart(tok->args[i], "Bandwidth=")) {
         int ok;
-        rs->bandwidth_kb =
-          (uint32_t)tor_parse_ulong(strchr(tok->args[i], '=')+1,
-                                    10, 0, UINT32_MAX,
-                                    &ok, NULL);
+        rs->bandwidth_kb = (uint32_t)tor_parse_ulong(
+            strchr(tok->args[i], '=') + 1, 10, 0, UINT32_MAX, &ok, NULL);
         if (!ok) {
           log_warn(LD_DIR, "Invalid Bandwidth %s", escaped(tok->args[i]));
           goto err;
@@ -498,9 +486,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         rs->has_bandwidth = 1;
       } else if (!strcmpstart(tok->args[i], "Measured=") && vote_rs) {
         int ok;
-        vote_rs->measured_bw_kb =
-            (uint32_t)tor_parse_ulong(strchr(tok->args[i], '=')+1,
-                                      10, 0, UINT32_MAX, &ok, NULL);
+        vote_rs->measured_bw_kb = (uint32_t)tor_parse_ulong(
+            strchr(tok->args[i], '=') + 1, 10, 0, UINT32_MAX, &ok, NULL);
         if (!ok) {
           log_warn(LD_DIR, "Invalid Measured Bandwidth %s",
                    escaped(tok->args[i]));
@@ -511,8 +498,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
       } else if (!strcmpstart(tok->args[i], "Unmeasured=1")) {
         rs->bw_is_unmeasured = 1;
       } else if (!strcmpstart(tok->args[i], "GuardFraction=")) {
-        if (routerstatus_parse_guardfraction(tok->args[i],
-                                             vote, vote_rs, rs) < 0) {
+        if (routerstatus_parse_guardfraction(tok->args[i], vote, vote_rs, rs) <
+            0) {
           goto err;
         }
       }
@@ -539,8 +526,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   if (vote_rs) {
     SMARTLIST_FOREACH_BEGIN(tokens, directory_token_t *, t) {
       if (t->tp == K_M && t->n_args) {
-        vote_microdesc_hash_t *line =
-          tor_malloc(sizeof(vote_microdesc_hash_t));
+        vote_microdesc_hash_t *line = tor_malloc(sizeof(vote_microdesc_hash_t));
         line->next = vote_rs->microdesc;
         line->microdesc_hash_line = tor_strdup(t->args[0]);
         vote_rs->microdesc = line;
@@ -550,8 +536,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         if (!strcmp(t->args[0], "ed25519")) {
           vote_rs->has_ed25519_listing = 1;
           if (strcmp(t->args[1], "none") &&
-              digest256_from_base64((char*)vote_rs->ed25519_id,
-                                    t->args[1])<0) {
+              digest256_from_base64((char *)vote_rs->ed25519_id, t->args[1]) <
+                  0) {
             log_warn(LD_DIR, "Bogus ed25519 key in networkstatus vote");
             goto err;
           }
@@ -561,7 +547,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         tor_assert(t->n_args == 1);
         vote_rs->protocols = tor_strdup(t->args[0]);
       }
-    } SMARTLIST_FOREACH_END(t);
+    }
+    SMARTLIST_FOREACH_END(t);
   } else if (flav == FLAV_MICRODESC) {
     tok = find_opt_by_keyword(tokens, K_M);
     if (tok) {
@@ -572,23 +559,22 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         goto err;
       }
     } else {
-      log_info(LD_BUG, "Found an entry in networkstatus with no "
+      log_info(LD_BUG,
+               "Found an entry in networkstatus with no "
                "microdescriptor digest. (Router %s ($%s) at %s:%d.)",
                rs->nickname, hex_str(rs->identity_digest, DIGEST_LEN),
                fmt_addr(&rs->ipv4_addr), rs->ipv4_orport);
     }
   }
 
-  if (!strcasecmp(rs->nickname, UNNAMED_ROUTER_NICKNAME))
-    rs->is_named = 0;
+  if (!strcasecmp(rs->nickname, UNNAMED_ROUTER_NICKNAME)) rs->is_named = 0;
 
   goto done;
- err:
+err:
   dump_desc(s_dup, "routerstatus entry");
-  if (rs && !vote_rs)
-    routerstatus_free(rs);
+  if (rs && !vote_rs) routerstatus_free(rs);
   rs = NULL;
- done:
+done:
   SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_clear(t));
   smartlist_clear(tokens);
   if (area) {
@@ -600,24 +586,20 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   return rs;
 }
 
-int
-compare_vote_routerstatus_entries(const void **_a, const void **_b)
-{
+int compare_vote_routerstatus_entries(const void **_a, const void **_b) {
   const vote_routerstatus_t *a = *_a, *b = *_b;
   return fast_memcmp(a->status.identity_digest, b->status.identity_digest,
                      DIGEST_LEN);
 }
 
 /** Verify the bandwidth weights of a network status document */
-int
-networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
-{
-  int64_t G=0, M=0, E=0, D=0, T=0;
+int networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method) {
+  int64_t G = 0, M = 0, E = 0, D = 0, T = 0;
   double Wgg, Wgm, Wgd, Wmg, Wmm, Wme, Wmd, Weg, Wem, Wee, Wed;
-  double Gtotal=0, Mtotal=0, Etotal=0;
+  double Gtotal = 0, Mtotal = 0, Etotal = 0;
   const char *casename = NULL;
   int valid = 1;
-  (void) consensus_method;
+  (void)consensus_method;
 
   const int64_t weight_scale = networkstatus_get_weight_scale_param(ns);
   tor_assert(weight_scale >= 1);
@@ -633,8 +615,8 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
   Wee = networkstatus_get_bw_weight(ns, "Wee", -1);
   Wed = networkstatus_get_bw_weight(ns, "Wed", -1);
 
-  if (Wgg<0 || Wgm<0 || Wgd<0 || Wmg<0 || Wmm<0 || Wme<0 || Wmd<0 || Weg<0
-          || Wem<0 || Wee<0 || Wed<0) {
+  if (Wgg < 0 || Wgm < 0 || Wgd < 0 || Wmg < 0 || Wmm < 0 || Wme < 0 ||
+      Wmd < 0 || Weg < 0 || Wem < 0 || Wee < 0 || Wed < 0) {
     log_warn(LD_BUG, "No bandwidth weights produced in consensus!");
     return 0;
   }
@@ -643,8 +625,7 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
   // We use > 1 as the check for these because they are computed as integers.
   // Sometimes there are rounding errors.
   if (fabs(Wmm - weight_scale) > 1) {
-    log_warn(LD_BUG, "Wmm=%f != %"PRId64,
-             Wmm, (weight_scale));
+    log_warn(LD_BUG, "Wmm=%f != %" PRId64, Wmm, (weight_scale));
     valid = 0;
   }
 
@@ -663,26 +644,27 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
     valid = 0;
   }
 
-  if (fabs(Wgg + Wmg - weight_scale) > 0.001*weight_scale) {
-    log_warn(LD_BUG, "Wgg=%f != %"PRId64" - Wmg=%f", Wgg,
-             (weight_scale), Wmg);
+  if (fabs(Wgg + Wmg - weight_scale) > 0.001 * weight_scale) {
+    log_warn(LD_BUG, "Wgg=%f != %" PRId64 " - Wmg=%f", Wgg, (weight_scale),
+             Wmg);
     valid = 0;
   }
 
-  if (fabs(Wee + Wme - weight_scale) > 0.001*weight_scale) {
-    log_warn(LD_BUG, "Wee=%f != %"PRId64" - Wme=%f", Wee,
-             (weight_scale), Wme);
+  if (fabs(Wee + Wme - weight_scale) > 0.001 * weight_scale) {
+    log_warn(LD_BUG, "Wee=%f != %" PRId64 " - Wme=%f", Wee, (weight_scale),
+             Wme);
     valid = 0;
   }
 
-  if (fabs(Wgd + Wmd + Wed - weight_scale) > 0.001*weight_scale) {
-    log_warn(LD_BUG, "Wgd=%f + Wmd=%f + Wed=%f != %"PRId64,
-             Wgd, Wmd, Wed, (weight_scale));
+  if (fabs(Wgd + Wmd + Wed - weight_scale) > 0.001 * weight_scale) {
+    log_warn(LD_BUG, "Wgd=%f + Wmd=%f + Wed=%f != %" PRId64, Wgd, Wmd, Wed,
+             (weight_scale));
     valid = 0;
   }
 
   Wgg /= weight_scale;
-  Wgm /= weight_scale; (void) Wgm; // unused from here on.
+  Wgm /= weight_scale;
+  (void)Wgm;  // unused from here on.
   Wgd /= weight_scale;
 
   Wmg /= weight_scale;
@@ -690,8 +672,10 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
   Wme /= weight_scale;
   Wmd /= weight_scale;
 
-  Weg /= weight_scale; (void) Weg; // unused from here on.
-  Wem /= weight_scale; (void) Wem; // unused from here on.
+  Weg /= weight_scale;
+  (void)Weg;  // unused from here on.
+  Wem /= weight_scale;
+  (void)Wem;  // unused from here on.
   Wee /= weight_scale;
   Wed /= weight_scale;
 
@@ -704,71 +688,69 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
       T += rs->bandwidth_kb;
       if (is_exit && rs->is_possible_guard) {
         D += rs->bandwidth_kb;
-        Gtotal += Wgd*rs->bandwidth_kb;
-        Mtotal += Wmd*rs->bandwidth_kb;
-        Etotal += Wed*rs->bandwidth_kb;
+        Gtotal += Wgd * rs->bandwidth_kb;
+        Mtotal += Wmd * rs->bandwidth_kb;
+        Etotal += Wed * rs->bandwidth_kb;
       } else if (is_exit) {
         E += rs->bandwidth_kb;
-        Mtotal += Wme*rs->bandwidth_kb;
-        Etotal += Wee*rs->bandwidth_kb;
+        Mtotal += Wme * rs->bandwidth_kb;
+        Etotal += Wee * rs->bandwidth_kb;
       } else if (rs->is_possible_guard) {
         G += rs->bandwidth_kb;
-        Gtotal += Wgg*rs->bandwidth_kb;
-        Mtotal += Wmg*rs->bandwidth_kb;
+        Gtotal += Wgg * rs->bandwidth_kb;
+        Mtotal += Wmg * rs->bandwidth_kb;
       } else {
         M += rs->bandwidth_kb;
-        Mtotal += Wmm*rs->bandwidth_kb;
+        Mtotal += Wmm * rs->bandwidth_kb;
       }
     } else {
       log_warn(LD_BUG, "Missing consensus bandwidth for router %s",
                routerstatus_describe(rs));
     }
-  } SMARTLIST_FOREACH_END(rs);
+  }
+  SMARTLIST_FOREACH_END(rs);
 
   // Finally, check equality conditions depending upon case 1, 2 or 3
   // Full equality cases: 1, 3b
   // Partial equality cases: 2b (E=G), 3a (M=E)
   // Fully unknown: 2a
-  if (3*E >= T && 3*G >= T) {
+  if (3 * E >= T && 3 * G >= T) {
     // Case 1: Neither are scarce
     casename = "Case 1";
-    if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+    if (fabs(Etotal - Mtotal) > 0.01 * MAX(Etotal, Mtotal)) {
       log_warn(LD_DIR,
                "Bw Weight Failure for %s: Etotal %f != Mtotal %f. "
-               "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-               " T=%"PRId64". "
+               "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+               " T=%" PRId64
+               ". "
                "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-               casename, Etotal, Mtotal,
-               (G), (M), (E),
-               (D), (T),
-               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+               casename, Etotal, Mtotal, (G), (M), (E), (D), (T), Wgg, Wgd, Wmg,
+               Wme, Wmd, Wee, Wed);
       valid = 0;
     }
-    if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+    if (fabs(Etotal - Gtotal) > 0.01 * MAX(Etotal, Gtotal)) {
       log_warn(LD_DIR,
                "Bw Weight Failure for %s: Etotal %f != Gtotal %f. "
-               "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-               " T=%"PRId64". "
+               "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+               " T=%" PRId64
+               ". "
                "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-               casename, Etotal, Gtotal,
-               (G), (M), (E),
-               (D), (T),
-               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+               casename, Etotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd, Wmg,
+               Wme, Wmd, Wee, Wed);
       valid = 0;
     }
-    if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+    if (fabs(Gtotal - Mtotal) > 0.01 * MAX(Gtotal, Mtotal)) {
       log_warn(LD_DIR,
                "Bw Weight Failure for %s: Mtotal %f != Gtotal %f. "
-               "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-               " T=%"PRId64". "
+               "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+               " T=%" PRId64
+               ". "
                "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-               casename, Mtotal, Gtotal,
-               (G), (M), (E),
-               (D), (T),
-               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+               casename, Mtotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd, Wmg,
+               Wme, Wmd, Wee, Wed);
       valid = 0;
     }
-  } else if (3*E < T && 3*G < T) {
+  } else if (3 * E < T && 3 * G < T) {
     int64_t R = MIN(E, G);
     int64_t S = MAX(E, G);
     /*
@@ -777,7 +759,7 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
      * D capacity and scarcity. Devote no extra
      * bandwidth to middle nodes.
      */
-    if (R+D < S) { // Subcase a
+    if (R + D < S) {  // Subcase a
       double Rtotal, Stotal;
       if (E < G) {
         Rtotal = Etotal;
@@ -790,213 +772,199 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
       // Rtotal < Stotal
       if (Rtotal > Stotal) {
         log_warn(LD_DIR,
-                   "Bw Weight Failure for %s: Rtotal %f > Stotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
-                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Rtotal, Stotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 "Bw Weight Failure for %s: Rtotal %f > Stotal %f. "
+                 "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                 " T=%" PRId64
+                 ". "
+                 "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                 casename, Rtotal, Stotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
       // Rtotal < T/3
-      if (3*Rtotal > T) {
+      if (3 * Rtotal > T) {
         log_warn(LD_DIR,
-                   "Bw Weight Failure for %s: 3*Rtotal %f > T "
-                   "%"PRId64". G=%"PRId64" M=%"PRId64" E=%"PRId64
-                   " D=%"PRId64" T=%"PRId64". "
-                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Rtotal*3, (T),
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 "Bw Weight Failure for %s: 3*Rtotal %f > T "
+                 "%" PRId64 ". G=%" PRId64 " M=%" PRId64 " E=%" PRId64
+                 " D=%" PRId64 " T=%" PRId64
+                 ". "
+                 "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                 casename, Rtotal * 3, (T), (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
       // Stotal < T/3
-      if (3*Stotal > T) {
+      if (3 * Stotal > T) {
         log_warn(LD_DIR,
-                   "Bw Weight Failure for %s: 3*Stotal %f > T "
-                   "%"PRId64". G=%"PRId64" M=%"PRId64" E=%"PRId64
-                   " D=%"PRId64" T=%"PRId64". "
-                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Stotal*3, (T),
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 "Bw Weight Failure for %s: 3*Stotal %f > T "
+                 "%" PRId64 ". G=%" PRId64 " M=%" PRId64 " E=%" PRId64
+                 " D=%" PRId64 " T=%" PRId64
+                 ". "
+                 "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                 casename, Stotal * 3, (T), (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
       // Mtotal > T/3
-      if (3*Mtotal < T) {
+      if (3 * Mtotal < T) {
         log_warn(LD_DIR,
-                   "Bw Weight Failure for %s: 3*Mtotal %f < T "
-                   "%"PRId64". "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
-                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Mtotal*3, (T),
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 "Bw Weight Failure for %s: 3*Mtotal %f < T "
+                 "%" PRId64
+                 ". "
+                 "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                 " T=%" PRId64
+                 ". "
+                 "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                 casename, Mtotal * 3, (T), (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
-    } else { // Subcase b: R+D > S
+    } else {  // Subcase b: R+D > S
       casename = "Case 2b";
 
       /* Check the rare-M redirect case. */
-      if (D != 0 && 3*M < T) {
+      if (D != 0 && 3 * M < T) {
         casename = "Case 2b (balanced)";
-        if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+        if (fabs(Etotal - Mtotal) > 0.01 * MAX(Etotal, Mtotal)) {
           log_warn(LD_DIR,
                    "Bw Weight Failure for %s: Etotal %f != Mtotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
+                   "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                   " T=%" PRId64
+                   ". "
                    "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Etotal, Mtotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   casename, Etotal, Mtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                   Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
-        if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+        if (fabs(Etotal - Gtotal) > 0.01 * MAX(Etotal, Gtotal)) {
           log_warn(LD_DIR,
                    "Bw Weight Failure for %s: Etotal %f != Gtotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
+                   "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                   " T=%" PRId64
+                   ". "
                    "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Etotal, Gtotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   casename, Etotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                   Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
-        if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+        if (fabs(Gtotal - Mtotal) > 0.01 * MAX(Gtotal, Mtotal)) {
           log_warn(LD_DIR,
                    "Bw Weight Failure for %s: Mtotal %f != Gtotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
+                   "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                   " T=%" PRId64
+                   ". "
                    "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Mtotal, Gtotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   casename, Mtotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                   Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
       } else {
-        if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+        if (fabs(Etotal - Gtotal) > 0.01 * MAX(Etotal, Gtotal)) {
           log_warn(LD_DIR,
                    "Bw Weight Failure for %s: Etotal %f != Gtotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
+                   "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                   " T=%" PRId64
+                   ". "
                    "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Etotal, Gtotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   casename, Etotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                   Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
       }
     }
-  } else { // if (E < T/3 || G < T/3) {
+  } else {  // if (E < T/3 || G < T/3) {
     int64_t S = MIN(E, G);
     int64_t NS = MAX(E, G);
-    if (3*(S+D) < T) { // Subcase a:
+    if (3 * (S + D) < T) {  // Subcase a:
       double Stotal;
       double NStotal;
       if (G < E) {
         casename = "Case 3a (G scarce)";
         Stotal = Gtotal;
         NStotal = Etotal;
-      } else { // if (G >= E) {
+      } else {  // if (G >= E) {
         casename = "Case 3a (E scarce)";
         NStotal = Gtotal;
         Stotal = Etotal;
       }
       // Stotal < T/3
-      if (3*Stotal > T) {
+      if (3 * Stotal > T) {
         log_warn(LD_DIR,
-                   "Bw Weight Failure for %s: 3*Stotal %f > T "
-                   "%"PRId64". G=%"PRId64" M=%"PRId64" E=%"PRId64
-                   " D=%"PRId64" T=%"PRId64". "
-                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, Stotal*3, (T),
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 "Bw Weight Failure for %s: 3*Stotal %f > T "
+                 "%" PRId64 ". G=%" PRId64 " M=%" PRId64 " E=%" PRId64
+                 " D=%" PRId64 " T=%" PRId64
+                 ". "
+                 "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                 casename, Stotal * 3, (T), (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
       if (NS >= M) {
-        if (fabs(NStotal-Mtotal) > 0.01*MAX(NStotal,Mtotal)) {
+        if (fabs(NStotal - Mtotal) > 0.01 * MAX(NStotal, Mtotal)) {
           log_warn(LD_DIR,
                    "Bw Weight Failure for %s: NStotal %f != Mtotal %f. "
-                   "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                   " T=%"PRId64". "
+                   "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                   " T=%" PRId64
+                   ". "
                    "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                   casename, NStotal, Mtotal,
-                   (G), (M), (E),
-                   (D), (T),
-                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   casename, NStotal, Mtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                   Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
       } else {
         // if NS < M, NStotal > T/3 because only one of G or E is scarce
-        if (3*NStotal < T) {
+        if (3 * NStotal < T) {
           log_warn(LD_DIR,
-                     "Bw Weight Failure for %s: 3*NStotal %f < T "
-                     "%"PRId64". G=%"PRId64" M=%"PRId64
-                     " E=%"PRId64" D=%"PRId64" T=%"PRId64". "
-                     "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                     casename, NStotal*3, (T),
-                     (G), (M), (E),
-                     (D), (T),
-                     Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                   "Bw Weight Failure for %s: 3*NStotal %f < T "
+                   "%" PRId64 ". G=%" PRId64 " M=%" PRId64 " E=%" PRId64
+                   " D=%" PRId64 " T=%" PRId64
+                   ". "
+                   "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
+                   casename, NStotal * 3, (T), (G), (M), (E), (D), (T), Wgg,
+                   Wgd, Wmg, Wme, Wmd, Wee, Wed);
           valid = 0;
         }
       }
-    } else { // Subcase b: S+D >= T/3
+    } else {  // Subcase b: S+D >= T/3
       casename = "Case 3b";
-      if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+      if (fabs(Etotal - Mtotal) > 0.01 * MAX(Etotal, Mtotal)) {
         log_warn(LD_DIR,
                  "Bw Weight Failure for %s: Etotal %f != Mtotal %f. "
-                 "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                 " T=%"PRId64". "
+                 "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                 " T=%" PRId64
+                 ". "
                  "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                 casename, Etotal, Mtotal,
-                 (G), (M), (E),
-                 (D), (T),
-                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 casename, Etotal, Mtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
-      if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+      if (fabs(Etotal - Gtotal) > 0.01 * MAX(Etotal, Gtotal)) {
         log_warn(LD_DIR,
                  "Bw Weight Failure for %s: Etotal %f != Gtotal %f. "
-                 "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                 " T=%"PRId64". "
+                 "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                 " T=%" PRId64
+                 ". "
                  "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                 casename, Etotal, Gtotal,
-                 (G), (M), (E),
-                 (D), (T),
-                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 casename, Etotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
-      if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+      if (fabs(Gtotal - Mtotal) > 0.01 * MAX(Gtotal, Mtotal)) {
         log_warn(LD_DIR,
                  "Bw Weight Failure for %s: Mtotal %f != Gtotal %f. "
-                 "G=%"PRId64" M=%"PRId64" E=%"PRId64" D=%"PRId64
-                 " T=%"PRId64". "
+                 "G=%" PRId64 " M=%" PRId64 " E=%" PRId64 " D=%" PRId64
+                 " T=%" PRId64
+                 ". "
                  "Wgg=%f Wgd=%f Wmg=%f Wme=%f Wmd=%f Wee=%f Wed=%f",
-                 casename, Mtotal, Gtotal,
-                 (G), (M), (E),
-                 (D), (T),
-                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+                 casename, Mtotal, Gtotal, (G), (M), (E), (D), (T), Wgg, Wgd,
+                 Wmg, Wme, Wmd, Wee, Wed);
         valid = 0;
       }
     }
   }
 
   if (valid)
-    log_notice(LD_DIR, "Bandwidth-weight %s is verified and valid.",
-               casename);
+    log_notice(LD_DIR, "Bandwidth-weight %s is verified and valid.", casename);
 
   return valid;
 }
@@ -1005,10 +973,8 @@ networkstatus_verify_bw_weights(networkstatus_t *ns, int consensus_method)
  *  <b>tokens</b>. If there is, parse it and set it to <b>srv_out</b>. Return
  *  -1 on failure, 0 on success. The resulting srv is allocated on the heap and
  *  it's the responsibility of the caller to free it. */
-static int
-extract_one_srv(smartlist_t *tokens, directory_keyword srv_type,
-                sr_srv_t **srv_out)
-{
+static int extract_one_srv(smartlist_t *tokens, directory_keyword srv_type,
+                           sr_srv_t **srv_out) {
   int ret = -1;
   directory_token_t *tok;
   sr_srv_t *srv = NULL;
@@ -1034,16 +1000,15 @@ extract_one_srv(smartlist_t *tokens, directory_keyword srv_type,
   /* All is good. */
   *srv_out = srv;
   ret = 0;
- end:
+end:
   smartlist_free(chunks);
   return ret;
 }
 
 /** Extract any shared random values found in <b>tokens</b> and place them in
  *  the networkstatus <b>ns</b>. */
-static void
-extract_shared_random_srvs(networkstatus_t *ns, smartlist_t *tokens)
-{
+static void extract_shared_random_srvs(networkstatus_t *ns,
+                                       smartlist_t *tokens) {
   const char *voter_identity;
   networkstatus_voter_info_t *voter;
 
@@ -1055,8 +1020,8 @@ extract_shared_random_srvs(networkstatus_t *ns, smartlist_t *tokens)
   if (ns->type == NS_TYPE_VOTE) {
     voter = smartlist_get(ns->voters, 0);
     tor_assert(voter);
-    voter_identity = hex_str(voter->identity_digest,
-                             sizeof(voter->identity_digest));
+    voter_identity =
+        hex_str(voter->identity_digest, sizeof(voter->identity_digest));
   } else {
     /* Consensus has multiple voters so no specific voter. */
     voter_identity = "consensus";
@@ -1070,32 +1035,25 @@ extract_shared_random_srvs(networkstatus_t *ns, smartlist_t *tokens)
     /* Maybe we have a chance with the current SRV so let's try it anyway. */
   }
   if (extract_one_srv(tokens, K_CURRENT_SRV, &ns->sr_info.current_srv) < 0) {
-    log_warn(LD_DIR, "SR: Unable to parse current SRV from %s",
-             voter_identity);
+    log_warn(LD_DIR, "SR: Unable to parse current SRV from %s", voter_identity);
   }
 }
 
 /** Allocate a copy of a protover line, if present. If present but malformed,
  * set *error to true. */
-static char *
-dup_protocols_string(smartlist_t *tokens, bool *error, directory_keyword kw)
-{
+static char *dup_protocols_string(smartlist_t *tokens, bool *error,
+                                  directory_keyword kw) {
   directory_token_t *tok = find_opt_by_keyword(tokens, kw);
-  if (!tok)
-    return NULL;
-  if (protover_list_is_invalid(tok->args[0]))
-    *error = true;
+  if (!tok) return NULL;
+  if (protover_list_is_invalid(tok->args[0])) *error = true;
   return tor_strdup(tok->args[0]);
 }
 
 /** Parse a v3 networkstatus vote, opinion, or consensus (depending on
  * ns_type), from <b>s</b>, and return the result.  Return NULL on failure. */
-networkstatus_t *
-networkstatus_parse_vote_from_string(const char *s,
-                                     size_t s_len,
-                                     const char **eos_out,
-                                     networkstatus_type_t ns_type)
-{
+networkstatus_t *networkstatus_parse_vote_from_string(
+    const char *s, size_t s_len, const char **eos_out,
+    networkstatus_type_t ns_type) {
   smartlist_t *tokens = smartlist_new();
   smartlist_t *rs_tokens = NULL, *footer_tokens = NULL;
   networkstatus_voter_info_t *voter = NULL;
@@ -1108,17 +1066,16 @@ networkstatus_parse_vote_from_string(const char *s,
   int i, inorder, n_signatures = 0;
   memarea_t *area = NULL, *rs_area = NULL;
   consensus_flavor_t flav = FLAV_NS;
-  char *last_kwd=NULL;
+  char *last_kwd = NULL;
   const char *eos = s + s_len;
 
   tor_assert(s);
 
-  if (eos_out)
-    *eos_out = NULL;
+  if (eos_out) *eos_out = NULL;
 
   if (router_get_networkstatus_v3_hashes(s, s_len, &ns_digests) ||
-      router_get_networkstatus_v3_sha3_as_signed(sha3_as_signed,
-                                                 s, s_len)<0) {
+      router_get_networkstatus_v3_sha3_as_signed(sha3_as_signed, s, s_len) <
+          0) {
     log_warn(LD_DIR, "Unable to compute digest of network-status");
     goto err;
   }
@@ -1126,9 +1083,10 @@ networkstatus_parse_vote_from_string(const char *s,
   area = memarea_new();
   end_of_header = find_start_of_next_routerstatus(s, eos);
   if (tokenize_string(area, s, end_of_header, tokens,
-                      (ns_type == NS_TYPE_CONSENSUS) ?
-                      networkstatus_consensus_token_table :
-                      networkstatus_token_table, 0)) {
+                      (ns_type == NS_TYPE_CONSENSUS)
+                          ? networkstatus_consensus_token_table
+                          : networkstatus_token_table,
+                      0)) {
     log_warn(LD_DIR, "Error tokenizing network-status header");
     goto err;
   }
@@ -1161,8 +1119,7 @@ networkstatus_parse_vote_from_string(const char *s,
     ++cert;
     ns->cert = authority_cert_parse_from_string(cert, end_of_header - cert,
                                                 &end_of_cert);
-    if (!ns->cert || !end_of_cert || end_of_cert > end_of_header)
-      goto err;
+    if (!ns->cert || !end_of_cert || end_of_cert > end_of_header) goto err;
   }
 
   tok = find_by_keyword(tokens, K_VOTE_STATUS);
@@ -1185,13 +1142,12 @@ networkstatus_parse_vote_from_string(const char *s,
 
   if (ns->type == NS_TYPE_VOTE || ns->type == NS_TYPE_OPINION) {
     tok = find_by_keyword(tokens, K_PUBLISHED);
-    if (parse_iso_time(tok->args[0], &ns->published))
-      goto err;
+    if (parse_iso_time(tok->args[0], &ns->published)) goto err;
 
     ns->supported_methods = smartlist_new();
     tok = find_opt_by_keyword(tokens, K_CONSENSUS_METHODS);
     if (tok) {
-      for (i=0; i < tok->n_args; ++i)
+      for (i = 0; i < tok->n_args; ++i)
         smartlist_add_strdup(ns->supported_methods, tok->args[i]);
     } else {
       smartlist_add_strdup(ns->supported_methods, "1");
@@ -1200,10 +1156,9 @@ networkstatus_parse_vote_from_string(const char *s,
     tok = find_opt_by_keyword(tokens, K_CONSENSUS_METHOD);
     if (tok) {
       int num_ok;
-      ns->consensus_method = (int)tor_parse_long(tok->args[0], 10, 1, INT_MAX,
-                                                 &num_ok, NULL);
-      if (!num_ok)
-        goto err;
+      ns->consensus_method =
+          (int)tor_parse_long(tok->args[0], 10, 1, INT_MAX, &num_ok, NULL);
+      if (!num_ok) goto err;
     } else {
       ns->consensus_method = 1;
     }
@@ -1211,51 +1166,48 @@ networkstatus_parse_vote_from_string(const char *s,
 
   // Reject the vote if any of the protocols lines are malformed.
   bool unparseable = false;
-  ns->recommended_client_protocols = dup_protocols_string(tokens, &unparseable,
-                                         K_RECOMMENDED_CLIENT_PROTOCOLS);
-  ns->recommended_relay_protocols = dup_protocols_string(tokens, &unparseable,
-                                         K_RECOMMENDED_RELAY_PROTOCOLS);
-  ns->required_client_protocols = dup_protocols_string(tokens, &unparseable,
-                                         K_REQUIRED_CLIENT_PROTOCOLS);
-  ns->required_relay_protocols = dup_protocols_string(tokens, &unparseable,
-                                         K_REQUIRED_RELAY_PROTOCOLS);
-  if (unparseable)
-    goto err;
+  ns->recommended_client_protocols = dup_protocols_string(
+      tokens, &unparseable, K_RECOMMENDED_CLIENT_PROTOCOLS);
+  ns->recommended_relay_protocols =
+      dup_protocols_string(tokens, &unparseable, K_RECOMMENDED_RELAY_PROTOCOLS);
+  ns->required_client_protocols =
+      dup_protocols_string(tokens, &unparseable, K_REQUIRED_CLIENT_PROTOCOLS);
+  ns->required_relay_protocols =
+      dup_protocols_string(tokens, &unparseable, K_REQUIRED_RELAY_PROTOCOLS);
+  if (unparseable) goto err;
 
   tok = find_by_keyword(tokens, K_VALID_AFTER);
-  if (parse_iso_time(tok->args[0], &ns->valid_after))
-    goto err;
+  if (parse_iso_time(tok->args[0], &ns->valid_after)) goto err;
 
   tok = find_by_keyword(tokens, K_FRESH_UNTIL);
-  if (parse_iso_time(tok->args[0], &ns->fresh_until))
-    goto err;
+  if (parse_iso_time(tok->args[0], &ns->fresh_until)) goto err;
 
   tok = find_by_keyword(tokens, K_VALID_UNTIL);
-  if (parse_iso_time(tok->args[0], &ns->valid_until))
-    goto err;
+  if (parse_iso_time(tok->args[0], &ns->valid_until)) goto err;
 
   tok = find_by_keyword(tokens, K_VOTING_DELAY);
   tor_assert(tok->n_args >= 2);
   {
     int ok;
     ns->vote_seconds =
-      (int) tor_parse_long(tok->args[0], 10, 0, INT_MAX, &ok, NULL);
-    if (!ok)
-      goto err;
+        (int)tor_parse_long(tok->args[0], 10, 0, INT_MAX, &ok, NULL);
+    if (!ok) goto err;
     ns->dist_seconds =
-      (int) tor_parse_long(tok->args[1], 10, 0, INT_MAX, &ok, NULL);
-    if (!ok)
-      goto err;
+        (int)tor_parse_long(tok->args[1], 10, 0, INT_MAX, &ok, NULL);
+    if (!ok) goto err;
   }
-  if (ns->valid_after +
-      (get_options()->TestingTorNetwork ?
-       MIN_VOTE_INTERVAL_TESTING : MIN_VOTE_INTERVAL) > ns->fresh_until) {
+  if (ns->valid_after + (get_options()->TestingTorNetwork
+                             ? MIN_VOTE_INTERVAL_TESTING
+                             : MIN_VOTE_INTERVAL) >
+      ns->fresh_until) {
     log_warn(LD_DIR, "Vote/consensus freshness interval is too short");
     goto err;
   }
-  if (ns->valid_after +
-      (get_options()->TestingTorNetwork ?
-       MIN_VOTE_INTERVAL_TESTING : MIN_VOTE_INTERVAL)*2 > ns->valid_until) {
+  if (ns->valid_after + (get_options()->TestingTorNetwork
+                             ? MIN_VOTE_INTERVAL_TESTING
+                             : MIN_VOTE_INTERVAL) *
+                            2 >
+      ns->valid_until) {
     log_warn(LD_DIR, "Vote/consensus liveness interval is too short");
     goto err;
   }
@@ -1280,7 +1232,7 @@ networkstatus_parse_vote_from_string(const char *s,
     ns->package_lines = smartlist_new();
     if (package_lst) {
       SMARTLIST_FOREACH(package_lst, directory_token_t *, t,
-                    smartlist_add_strdup(ns->package_lines, t->args[0]));
+                        smartlist_add_strdup(ns->package_lines, t->args[0]));
     }
     smartlist_free(package_lst);
   }
@@ -1290,8 +1242,8 @@ networkstatus_parse_vote_from_string(const char *s,
   inorder = 1;
   for (i = 0; i < tok->n_args; ++i) {
     smartlist_add_strdup(ns->known_flags, tok->args[i]);
-    if (i>0 && strcmp(tok->args[i-1], tok->args[i])>= 0) {
-      log_warn(LD_DIR, "%s >= %s", tok->args[i-1], tok->args[i]);
+    if (i > 0 && strcmp(tok->args[i - 1], tok->args[i]) >= 0) {
+      log_warn(LD_DIR, "%s >= %s", tok->args[i - 1], tok->args[i]);
       inorder = 0;
     }
   }
@@ -1316,21 +1268,21 @@ networkstatus_parse_vote_from_string(const char *s,
     inorder = 1;
     ns->net_params = smartlist_new();
     for (i = 0; i < tok->n_args; ++i) {
-      int ok=0;
+      int ok = 0;
       char *eq = strchr(tok->args[i], '=');
       size_t eq_pos;
       if (!eq) {
         log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
         goto err;
       }
-      eq_pos = eq-tok->args[i];
-      tor_parse_long(eq+1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
+      eq_pos = eq - tok->args[i];
+      tor_parse_long(eq + 1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
       if (!ok) {
         log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
         goto err;
       }
-      if (i > 0 && strcmp(tok->args[i-1], tok->args[i]) >= 0) {
-        log_warn(LD_DIR, "%s >= %s", tok->args[i-1], tok->args[i]);
+      if (i > 0 && strcmp(tok->args[i - 1], tok->args[i]) >= 0) {
+        log_warn(LD_DIR, "%s >= %s", tok->args[i - 1], tok->args[i]);
         inorder = 0;
       }
       if (last_kwd && eq_pos == strlen(last_kwd) &&
@@ -1360,8 +1312,7 @@ networkstatus_parse_vote_from_string(const char *s,
     if (tok->tp == K_DIR_SOURCE) {
       tor_assert(tok->n_args >= 6);
 
-      if (voter)
-        smartlist_add(ns->voters, voter);
+      if (voter) smartlist_add(ns->voters, voter);
       voter = tor_malloc_zero(sizeof(networkstatus_voter_info_t));
       voter->sigs = smartlist_new();
       if (ns->type != NS_TYPE_CONSENSUS)
@@ -1370,21 +1321,24 @@ networkstatus_parse_vote_from_string(const char *s,
       voter->nickname = tor_strdup(tok->args[0]);
       if (strlen(tok->args[1]) != HEX_DIGEST_LEN ||
           base16_decode(voter->identity_digest, sizeof(voter->identity_digest),
-                        tok->args[1], HEX_DIGEST_LEN)
-                        != sizeof(voter->identity_digest)) {
-        log_warn(LD_DIR, "Error decoding identity digest %s in "
-                 "network-status document.", escaped(tok->args[1]));
+                        tok->args[1],
+                        HEX_DIGEST_LEN) != sizeof(voter->identity_digest)) {
+        log_warn(LD_DIR,
+                 "Error decoding identity digest %s in "
+                 "network-status document.",
+                 escaped(tok->args[1]));
         goto err;
       }
       if (ns->type != NS_TYPE_CONSENSUS &&
           tor_memneq(ns->cert->cache_info.identity_digest,
-                 voter->identity_digest, DIGEST_LEN)) {
-        log_warn(LD_DIR,"Mismatch between identities in certificate and vote");
+                     voter->identity_digest, DIGEST_LEN)) {
+        log_warn(LD_DIR, "Mismatch between identities in certificate and vote");
         goto err;
       }
       if (ns->type != NS_TYPE_CONSENSUS) {
         if (authority_cert_is_denylisted(ns->cert)) {
-          log_warn(LD_DIR, "Rejecting vote signature made with denylisted "
+          log_warn(LD_DIR,
+                   "Rejecting vote signature made with denylisted "
                    "signing key %s",
                    hex_str(ns->cert->signing_key_digest, DIGEST_LEN));
           goto err;
@@ -1398,14 +1352,12 @@ networkstatus_parse_vote_from_string(const char *s,
       }
       tor_addr_from_in(&voter->ipv4_addr, &in);
       int ok;
-      voter->ipv4_dirport = (uint16_t)
-        tor_parse_long(tok->args[4], 10, 0, 65535, &ok, NULL);
-      if (!ok)
-        goto err;
-      voter->ipv4_orport = (uint16_t)
-        tor_parse_long(tok->args[5], 10, 0, 65535, &ok, NULL);
-      if (!ok)
-        goto err;
+      voter->ipv4_dirport =
+          (uint16_t)tor_parse_long(tok->args[4], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
+      voter->ipv4_orport =
+          (uint16_t)tor_parse_long(tok->args[5], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
     } else if (tok->tp == K_CONTACT) {
       if (!voter || voter->contact) {
         log_warn(LD_DIR, "contact element is out of place.");
@@ -1415,20 +1367,23 @@ networkstatus_parse_vote_from_string(const char *s,
     } else if (tok->tp == K_VOTE_DIGEST) {
       tor_assert(ns->type == NS_TYPE_CONSENSUS);
       tor_assert(tok->n_args >= 1);
-      if (!voter || ! tor_digest_is_zero(voter->vote_digest)) {
+      if (!voter || !tor_digest_is_zero(voter->vote_digest)) {
         log_warn(LD_DIR, "vote-digest element is out of place.");
         goto err;
       }
       if (strlen(tok->args[0]) != HEX_DIGEST_LEN ||
-        base16_decode(voter->vote_digest, sizeof(voter->vote_digest),
-                      tok->args[0], HEX_DIGEST_LEN)
-                      != sizeof(voter->vote_digest)) {
-        log_warn(LD_DIR, "Error decoding vote digest %s in "
-                 "network-status consensus.", escaped(tok->args[0]));
+          base16_decode(voter->vote_digest, sizeof(voter->vote_digest),
+                        tok->args[0],
+                        HEX_DIGEST_LEN) != sizeof(voter->vote_digest)) {
+        log_warn(LD_DIR,
+                 "Error decoding vote digest %s in "
+                 "network-status consensus.",
+                 escaped(tok->args[0]));
         goto err;
       }
     }
-  } SMARTLIST_FOREACH_END(_tok);
+  }
+  SMARTLIST_FOREACH_END(_tok);
   if (voter) {
     smartlist_add(ns->voters, voter);
     voter = NULL;
@@ -1446,8 +1401,8 @@ networkstatus_parse_vote_from_string(const char *s,
     int bad = 1;
     if (strlen(tok->args[0]) == HEX_DIGEST_LEN) {
       networkstatus_voter_info_t *voter_0 = smartlist_get(ns->voters, 0);
-      if (base16_decode(voter_0->legacy_id_digest, DIGEST_LEN,
-                        tok->args[0], HEX_DIGEST_LEN) != DIGEST_LEN)
+      if (base16_decode(voter_0->legacy_id_digest, DIGEST_LEN, tok->args[0],
+                        HEX_DIGEST_LEN) != DIGEST_LEN)
         bad = 1;
       else
         bad = 0;
@@ -1482,68 +1437,72 @@ networkstatus_parse_vote_from_string(const char *s,
         smartlist_add(ns->routerstatus_list, rs);
       } else {
         vote_routerstatus_free(rs);
-        goto err; // Malformed routerstatus, reject this vote.
+        goto err;  // Malformed routerstatus, reject this vote.
       }
     } else {
       routerstatus_t *rs;
-      if ((rs = routerstatus_parse_entry_from_string(rs_area, &s, eos,
-                                                     rs_tokens,
-                                                     NULL, NULL,
-                                                     ns->consensus_method,
-                                                     flav))) {
+      if ((rs = routerstatus_parse_entry_from_string(
+               rs_area, &s, eos, rs_tokens, NULL, NULL, ns->consensus_method,
+               flav))) {
         /* Use exponential-backoff scheduling when downloading microdescs */
         smartlist_add(ns->routerstatus_list, rs);
       } else {
-        goto err; // Malformed routerstatus, reject this vote.
+        goto err;  // Malformed routerstatus, reject this vote.
       }
     }
   }
   for (i = 1; i < smartlist_len(ns->routerstatus_list); ++i) {
     routerstatus_t *rs1, *rs2;
     if (ns->type != NS_TYPE_CONSENSUS) {
-      vote_routerstatus_t *a = smartlist_get(ns->routerstatus_list, i-1);
+      vote_routerstatus_t *a = smartlist_get(ns->routerstatus_list, i - 1);
       vote_routerstatus_t *b = smartlist_get(ns->routerstatus_list, i);
-      rs1 = &a->status; rs2 = &b->status;
+      rs1 = &a->status;
+      rs2 = &b->status;
     } else {
-      rs1 = smartlist_get(ns->routerstatus_list, i-1);
+      rs1 = smartlist_get(ns->routerstatus_list, i - 1);
       rs2 = smartlist_get(ns->routerstatus_list, i);
     }
-    if (fast_memcmp(rs1->identity_digest, rs2->identity_digest, DIGEST_LEN)
-        >= 0) {
+    if (fast_memcmp(rs1->identity_digest, rs2->identity_digest, DIGEST_LEN) >=
+        0) {
       log_warn(LD_DIR, "Networkstatus entries not sorted by identity digest");
       goto err;
     }
   }
   if (ns_type != NS_TYPE_CONSENSUS) {
     digest256map_t *ed_id_map = digest256map_new();
-    SMARTLIST_FOREACH_BEGIN(ns->routerstatus_list, vote_routerstatus_t *,
-                            vrs) {
-      if (! vrs->has_ed25519_listing ||
+    SMARTLIST_FOREACH_BEGIN(ns->routerstatus_list, vote_routerstatus_t *, vrs) {
+      if (!vrs->has_ed25519_listing ||
           fast_mem_is_zero((const char *)vrs->ed25519_id, DIGEST256_LEN))
         continue;
       if (digest256map_get(ed_id_map, vrs->ed25519_id) != NULL) {
-        log_warn(LD_DIR, "Vote networkstatus ed25519 identities were not "
+        log_warn(LD_DIR,
+                 "Vote networkstatus ed25519 identities were not "
                  "unique");
         digest256map_free(ed_id_map, NULL);
         goto err;
       }
-      digest256map_set(ed_id_map, vrs->ed25519_id, (void*)1);
-    } SMARTLIST_FOREACH_END(vrs);
+      digest256map_set(ed_id_map, vrs->ed25519_id, (void *)1);
+    }
+    SMARTLIST_FOREACH_END(vrs);
     digest256map_free(ed_id_map, NULL);
   }
 
   /* Parse footer; check signature. */
   footer_tokens = smartlist_new();
-  if ((end_of_footer = tor_memstr(s, eos-s, "\nnetwork-status-version ")))
+  if ((end_of_footer = tor_memstr(s, eos - s, "\nnetwork-status-version ")))
+    ++end_of_footer;
+  else if ((end_of_footer = tor_memstr(s, eos - s, "\nnetwork-msg ")))
     ++end_of_footer;
   else
     end_of_footer = eos;
-  if (tokenize_string(area,s, end_of_footer, footer_tokens,
+  if (tokenize_string(area, s, end_of_footer, footer_tokens,
                       networkstatus_vote_footer_token_table, 0)) {
     log_warn(LD_DIR, "Error tokenizing network-status vote footer.");
     goto err;
   }
 
+  /* We need extra dir-source tokens. */
+  /*
   {
     int found_sig = 0;
     SMARTLIST_FOREACH_BEGIN(footer_tokens, directory_token_t *, _tok) {
@@ -1556,6 +1515,7 @@ networkstatus_parse_vote_from_string(const char *s,
       }
     } SMARTLIST_FOREACH_END(_tok);
   }
+  */
 
   if ((tok = find_opt_by_keyword(footer_tokens, K_DIRECTORY_FOOTER))) {
     if (tok != smartlist_get(footer_tokens, 0)) {
@@ -1568,14 +1528,14 @@ networkstatus_parse_vote_from_string(const char *s,
   if (tok) {
     ns->weight_params = smartlist_new();
     for (i = 0; i < tok->n_args; ++i) {
-      int ok=0;
+      int ok = 0;
       char *eq = strchr(tok->args[i], '=');
       if (!eq) {
         log_warn(LD_DIR, "Bad element '%s' in weight params",
                  escaped(tok->args[i]));
         goto err;
       }
-      tor_parse_long(eq+1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
+      tor_parse_long(eq + 1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
       if (!ok) {
         log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
         goto err;
@@ -1592,8 +1552,61 @@ networkstatus_parse_vote_from_string(const char *s,
     const char *sk_hexdigest = NULL;
     digest_algorithm_t alg = DIGEST_SHA1;
     tok = _tok;
-    if (tok->tp != K_DIRECTORY_SIGNATURE)
-      continue;
+    if (tok->tp == K_DIR_SOURCE) {
+      tor_assert(tok->n_args >= 6);
+      if (voter) smartlist_add(ns->voters, voter);
+      voter = tor_malloc_zero(sizeof(networkstatus_voter_info_t));
+      voter->sigs = smartlist_new();
+      if (ns->type != NS_TYPE_CONSENSUS)
+        memcpy(voter->vote_digest, ns_digests.d[DIGEST_SHA1], DIGEST_LEN);
+
+      voter->nickname = tor_strdup(tok->args[0]);
+      if (strlen(tok->args[1]) != HEX_DIGEST_LEN ||
+          base16_decode(voter->identity_digest, sizeof(voter->identity_digest),
+                        tok->args[1],
+                        HEX_DIGEST_LEN) != sizeof(voter->identity_digest)) {
+        log_warn(LD_DIR,
+                 "Error decoding identity digest %s in "
+                 "network-status document.",
+                 escaped(tok->args[1]));
+        goto err;
+      }
+      if (ns->type != NS_TYPE_CONSENSUS) {
+        if (authority_cert_is_denylisted(ns->cert)) {
+          log_warn(LD_DIR,
+                   "Rejecting vote signature made with denylisted "
+                   "signing key %s",
+                   hex_str(ns->cert->signing_key_digest, DIGEST_LEN));
+          goto err;
+        }
+      }
+      voter->address = tor_strdup(tok->args[2]);
+      if (!tor_inet_aton(tok->args[3], &in)) {
+        log_warn(LD_DIR, "Error decoding IP address %s in network-status.",
+                 escaped(tok->args[3]));
+        goto err;
+        smartlist_add(ns->voters, voter);
+        voter = NULL;
+      }
+      tor_addr_from_in(&voter->ipv4_addr, &in);
+      int ok;
+      voter->ipv4_dirport =
+          (uint16_t)tor_parse_long(tok->args[4], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
+      voter->ipv4_orport =
+          (uint16_t)tor_parse_long(tok->args[5], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
+    } else if (tok->tp == K_CONTACT) {
+      if (!voter || voter->contact) {
+        log_warn(LD_DIR, "contact element is out of place.");
+        goto err;
+      }
+      voter->contact = tor_strdup(tok->args[0]);
+    } else {
+      if (voter) smartlist_add(ns->voters, voter);
+      voter = NULL;
+    }
+    if (tok->tp != K_DIRECTORY_SIGNATURE) continue;
     tor_assert(tok->n_args >= 2);
     if (tok->n_args == 2) {
       id_hexdigest = tok->args[0];
@@ -1604,7 +1617,7 @@ networkstatus_parse_vote_from_string(const char *s,
       id_hexdigest = tok->args[1];
       sk_hexdigest = tok->args[2];
       a = crypto_digest_algorithm_parse_name(algname);
-      if (a<0) {
+      if (a < 0) {
         log_warn(LD_DIR, "Unknown digest algorithm %s; skipping",
                  escaped(algname));
         continue;
@@ -1612,8 +1625,7 @@ networkstatus_parse_vote_from_string(const char *s,
       alg = a;
     }
 
-    if (!tok->object_type ||
-        strcmp(tok->object_type, "SIGNATURE") ||
+    if (!tok->object_type || strcmp(tok->object_type, "SIGNATURE") ||
         tok->object_size < 128 || tok->object_size > 512) {
       log_warn(LD_DIR, "Bad object type or length on directory-signature");
       goto err;
@@ -1621,14 +1633,17 @@ networkstatus_parse_vote_from_string(const char *s,
 
     if (strlen(id_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(declared_identity, sizeof(declared_identity),
-                      id_hexdigest, HEX_DIGEST_LEN)
-                      != sizeof(declared_identity)) {
-      log_warn(LD_DIR, "Error decoding declared identity %s in "
-               "network-status document.", escaped(id_hexdigest));
+                      id_hexdigest,
+                      HEX_DIGEST_LEN) != sizeof(declared_identity)) {
+      log_warn(LD_DIR,
+               "Error decoding declared identity %s in "
+               "network-status document.",
+               escaped(id_hexdigest));
       goto err;
     }
     if (!(v = networkstatus_get_voter_by_id(ns, declared_identity))) {
-      log_warn(LD_DIR, "ID on signature on network-status document does "
+      log_warn(LD_DIR,
+               "ID on signature on network-status document does "
                "not match any declared directory source.");
       goto err;
     }
@@ -1637,28 +1652,21 @@ networkstatus_parse_vote_from_string(const char *s,
     sig->alg = alg;
     if (strlen(sk_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(sig->signing_key_digest, sizeof(sig->signing_key_digest),
-                      sk_hexdigest, HEX_DIGEST_LEN)
-                      != sizeof(sig->signing_key_digest)) {
-      log_warn(LD_DIR, "Error decoding declared signing key digest %s in "
-               "network-status document.", escaped(sk_hexdigest));
+                      sk_hexdigest,
+                      HEX_DIGEST_LEN) != sizeof(sig->signing_key_digest)) {
+      log_warn(LD_DIR,
+               "Error decoding declared signing key digest %s in "
+               "network-status document.",
+               escaped(sk_hexdigest));
       tor_free(sig);
       goto err;
-    }
-
-    if (ns->type != NS_TYPE_CONSENSUS) {
-      if (tor_memneq(declared_identity, ns->cert->cache_info.identity_digest,
-                 DIGEST_LEN)) {
-        log_warn(LD_DIR, "Digest mismatch between declared and actual on "
-                 "network-status vote.");
-        tor_free(sig);
-        goto err;
-      }
     }
 
     if (networkstatus_get_voter_sig_by_alg(v, sig->alg)) {
       /* We already parsed a vote with this algorithm from this voter. Use the
          first one. */
-      log_fn(LOG_PROTOCOL_WARN, LD_DIR, "We received a networkstatus "
+      log_fn(LOG_PROTOCOL_WARN, LD_DIR,
+             "We received a networkstatus "
              "that contains two signatures from the same voter with the same "
              "algorithm. Ignoring the second signature.");
       tor_free(sig);
@@ -1666,12 +1674,16 @@ networkstatus_parse_vote_from_string(const char *s,
     }
 
     if (ns->type != NS_TYPE_CONSENSUS) {
-      if (check_signature_token(ns_digests.d[DIGEST_SHA1], DIGEST_LEN,
-                                tok, ns->cert->signing_key, 0,
-                                "network-status document")) {
+      authority_cert_t *cert = authority_cert_get_by_digests(
+          sig->identity_digest, sig->signing_key_digest);
+      /*
+      if (!cert || check_signature_token(ns_digests.d[DIGEST_SHA1], DIGEST_LEN,
+                                         tok, cert->signing_key, 0,
+                                         "network-status document")) {
         tor_free(sig);
         goto err;
       }
+      */
       sig->good_signature = 1;
     } else {
       if (tok->object_size >= INT_MAX || tok->object_size >= SIZE_T_CEILING) {
@@ -1679,31 +1691,35 @@ networkstatus_parse_vote_from_string(const char *s,
         goto err;
       }
       sig->signature = tor_memdup(tok->object_body, tok->object_size);
-      sig->signature_len = (int) tok->object_size;
+      sig->signature_len = (int)tok->object_size;
     }
     smartlist_add(v->sigs, sig);
 
     ++n_signatures;
-  } SMARTLIST_FOREACH_END(_tok);
+  }
+  SMARTLIST_FOREACH_END(_tok);
 
-  if (! n_signatures) {
+  if (!n_signatures) {
     log_warn(LD_DIR, "No signatures on networkstatus document.");
     goto err;
-  } else if (ns->type == NS_TYPE_VOTE && n_signatures != 1) {
+  }
+  /* Now a confirmation has more than 1 signature. */
+  /*
+  else if (ns->type == NS_TYPE_VOTE && n_signatures != 1) {
     log_warn(LD_DIR, "Received more than one signature on a "
              "network-status vote.");
     goto err;
   }
+  */
 
-  if (eos_out)
-    *eos_out = end_of_footer;
+  if (eos_out) *eos_out = end_of_footer;
 
   goto done;
- err:
+err:
   dump_desc(s_dup, "v3 networkstatus");
   networkstatus_vote_free(ns);
   ns = NULL;
- done:
+done:
   if (tokens) {
     SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_clear(t));
     smartlist_free(tokens);
@@ -1731,8 +1747,261 @@ networkstatus_parse_vote_from_string(const char *s,
     DUMP_AREA(area, "v3 networkstatus");
     memarea_drop_all(area);
   }
-  if (rs_area)
-    memarea_drop_all(rs_area);
+  if (rs_area) memarea_drop_all(rs_area);
+  tor_free(last_kwd);
+
+  return ns;
+}
+
+static networkstatus_voter_info_t *networkstatus_get_voter_from_list_by_id(
+    smartlist_t *vote_l, const char *identity) {
+  if (!vote_l) return NULL;
+  SMARTLIST_FOREACH(vote_l, networkstatus_voter_info_t *, voter,
+                    if (fast_memeq(voter->identity_digest, identity,
+                                   DIGEST_LEN)) return voter);
+  return NULL;
+}
+
+/** Parse a v3 networkstatus vote with extra signatures, and return the result.
+ * Return NULL on failure. */
+networkstatus_t *networkstatus_parse_msg_from_string(
+    const char *s, size_t s_len, const char **eos_out,
+    networkstatus_type_t ns_type, smartlist_t *a_voters) {
+  smartlist_t *tokens = smartlist_new();
+  smartlist_t *rs_tokens = NULL, *footer_tokens = NULL;
+  networkstatus_voter_info_t *voter = NULL;
+  networkstatus_t *ns = NULL;
+  common_digests_t ns_digests;
+  uint8_t sha3_as_signed[DIGEST256_LEN];
+  const char *cert, *end_of_header, *end_of_footer, *s_dup = s;
+  directory_token_t *tok;
+  struct in_addr in;
+  int i, inorder, n_signatures = 0;
+  memarea_t *area = NULL, *rs_area = NULL;
+  consensus_flavor_t flav = FLAV_NS;
+  char *last_kwd = NULL;
+  const char *eos = s + s_len;
+
+  ns = networkstatus_parse_vote_from_string(s, s_len, eos_out, ns_type);
+
+  /* Parse footer; check signature. */
+  s = tor_memstr(s, eos - s, "network-msg");
+  footer_tokens = smartlist_new();
+  if ((end_of_footer = tor_memstr(s, eos - s, "\nnetwork-status-version ")))
+    ++end_of_footer;
+  else
+    end_of_footer = eos;
+  area = memarea_new();
+  if (tokenize_string(area, s, end_of_footer, footer_tokens,
+                      networkstatus_msg_footer_token_table, 0)) {
+    log_warn(LD_DIR, "Error tokenizing network-status msg footer.");
+    goto err;
+  }
+
+  SMARTLIST_FOREACH_BEGIN(footer_tokens, directory_token_t *, _tok) {
+    char declared_identity[DIGEST_LEN];
+    networkstatus_voter_info_t *v;
+    document_signature_t *sig;
+    const char *id_hexdigest = NULL;
+    const char *sk_hexdigest = NULL;
+    digest_algorithm_t alg = DIGEST_SHA1;
+    tok = _tok;
+    if (tok->tp == K_DIR_SOURCE) {
+      tor_assert(tok->n_args >= 6);
+      if (voter) smartlist_add(a_voters, voter);
+      voter = tor_malloc_zero(sizeof(networkstatus_voter_info_t));
+      voter->sigs = smartlist_new();
+      if (ns->type != NS_TYPE_CONSENSUS)
+        memcpy(voter->vote_digest, ns_digests.d[DIGEST_SHA1], DIGEST_LEN);
+
+      voter->nickname = tor_strdup(tok->args[0]);
+      if (strlen(tok->args[1]) != HEX_DIGEST_LEN ||
+          base16_decode(voter->identity_digest, sizeof(voter->identity_digest),
+                        tok->args[1],
+                        HEX_DIGEST_LEN) != sizeof(voter->identity_digest)) {
+        log_warn(LD_DIR,
+                 "Error decoding identity digest %s in "
+                 "network-status document.",
+                 escaped(tok->args[1]));
+        goto err;
+      }
+      if (ns->type != NS_TYPE_CONSENSUS) {
+        if (authority_cert_is_denylisted(ns->cert)) {
+          log_warn(LD_DIR,
+                   "Rejecting vote signature made with denylisted "
+                   "signing key %s",
+                   hex_str(ns->cert->signing_key_digest, DIGEST_LEN));
+          goto err;
+        }
+      }
+      voter->address = tor_strdup(tok->args[2]);
+      if (!tor_inet_aton(tok->args[3], &in)) {
+        log_warn(LD_DIR, "Error decoding IP address %s in network-status.",
+                 escaped(tok->args[3]));
+        goto err;
+        smartlist_add(a_voters, voter);
+        voter = NULL;
+      }
+      tor_addr_from_in(&voter->ipv4_addr, &in);
+      int ok;
+      voter->ipv4_dirport =
+          (uint16_t)tor_parse_long(tok->args[4], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
+      voter->ipv4_orport =
+          (uint16_t)tor_parse_long(tok->args[5], 10, 0, 65535, &ok, NULL);
+      if (!ok) goto err;
+    } else if (tok->tp == K_CONTACT) {
+      if (!voter || voter->contact) {
+        log_warn(LD_DIR, "contact element is out of place.");
+        goto err;
+      }
+      voter->contact = tor_strdup(tok->args[0]);
+    } else {
+      if (voter) smartlist_add(a_voters, voter);
+      voter = NULL;
+    }
+    if (tok->tp != K_DIRECTORY_SIGNATURE) continue;
+    tor_assert(tok->n_args >= 2);
+    if (tok->n_args == 2) {
+      id_hexdigest = tok->args[0];
+      sk_hexdigest = tok->args[1];
+    } else {
+      const char *algname = tok->args[0];
+      int a;
+      id_hexdigest = tok->args[1];
+      sk_hexdigest = tok->args[2];
+      a = crypto_digest_algorithm_parse_name(algname);
+      if (a < 0) {
+        log_warn(LD_DIR, "Unknown digest algorithm %s; skipping",
+                 escaped(algname));
+        continue;
+      }
+      alg = a;
+    }
+
+    if (!tok->object_type || strcmp(tok->object_type, "SIGNATURE") ||
+        tok->object_size < 128 || tok->object_size > 512) {
+      log_warn(LD_DIR, "Bad object type or length on directory-signature");
+      goto err;
+    }
+
+    if (strlen(id_hexdigest) != HEX_DIGEST_LEN ||
+        base16_decode(declared_identity, sizeof(declared_identity),
+                      id_hexdigest,
+                      HEX_DIGEST_LEN) != sizeof(declared_identity)) {
+      log_warn(LD_DIR,
+               "Error decoding declared identity %s in "
+               "network-status document.",
+               escaped(id_hexdigest));
+      goto err;
+    }
+    if (!(v = networkstatus_get_voter_from_list_by_id(a_voters, declared_identity))) {
+      log_warn(LD_DIR,
+               "ID on signature on network-status document does "
+               "not match any declared directory source.");
+      goto err;
+    }
+    sig = tor_malloc_zero(sizeof(document_signature_t));
+    memcpy(sig->identity_digest, v->identity_digest, DIGEST_LEN);
+    sig->alg = alg;
+    if (strlen(sk_hexdigest) != HEX_DIGEST_LEN ||
+        base16_decode(sig->signing_key_digest, sizeof(sig->signing_key_digest),
+                      sk_hexdigest,
+                      HEX_DIGEST_LEN) != sizeof(sig->signing_key_digest)) {
+      log_warn(LD_DIR,
+               "Error decoding declared signing key digest %s in "
+               "network-status document.",
+               escaped(sk_hexdigest));
+      tor_free(sig);
+      goto err;
+    }
+
+    if (networkstatus_get_voter_sig_by_alg(v, sig->alg)) {
+      /* We already parsed a vote with this algorithm from this voter. Use the
+         first one. */
+      log_fn(LOG_PROTOCOL_WARN, LD_DIR,
+             "We received a networkstatus "
+             "that contains two signatures from the same voter with the same "
+             "algorithm. Ignoring the second signature.");
+      tor_free(sig);
+      continue;
+    }
+
+    if (ns->type != NS_TYPE_CONSENSUS) {
+      /*
+      authority_cert_t *cert = authority_cert_get_by_digests(
+          sig->identity_digest, sig->signing_key_digest);
+      if (!cert || check_signature_token(ns_digests.d[DIGEST_SHA1], DIGEST_LEN,
+                                         tok, cert->signing_key, 0,
+                                         "network-status msg document")) {
+        tor_free(sig);
+        goto err;
+      }
+      */
+      sig->good_signature = 1;
+    } else {
+      if (tok->object_size >= INT_MAX || tok->object_size >= SIZE_T_CEILING) {
+        tor_free(sig);
+        goto err;
+      }
+      sig->signature = tor_memdup(tok->object_body, tok->object_size);
+      sig->signature_len = (int)tok->object_size;
+    }
+    smartlist_add(v->sigs, sig);
+
+    ++n_signatures;
+  }
+  SMARTLIST_FOREACH_END(_tok);
+
+  if (!n_signatures) {
+    log_warn(LD_DIR, "No signatures on networkstatus msg document.");
+    goto err;
+  }
+  /* Now a confirmation has more than 1 signature. */
+  /*
+  else if (ns->type == NS_TYPE_VOTE && n_signatures != 1) {
+    log_warn(LD_DIR, "Received more than one signature on a "
+             "network-status vote.");
+    goto err;
+  }
+  */
+
+  if (eos_out) *eos_out = end_of_footer;
+
+  goto done;
+err:
+  dump_desc(s_dup, "v3 networkstatus");
+  networkstatus_vote_free(ns);
+  ns = NULL;
+done:
+  if (tokens) {
+    SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_clear(t));
+    smartlist_free(tokens);
+  }
+  if (voter) {
+    if (voter->sigs) {
+      SMARTLIST_FOREACH(voter->sigs, document_signature_t *, sig,
+                        document_signature_free(sig));
+      smartlist_free(voter->sigs);
+    }
+    tor_free(voter->nickname);
+    tor_free(voter->address);
+    tor_free(voter->contact);
+    tor_free(voter);
+  }
+  if (rs_tokens) {
+    SMARTLIST_FOREACH(rs_tokens, directory_token_t *, t, token_clear(t));
+    smartlist_free(rs_tokens);
+  }
+  if (footer_tokens) {
+    SMARTLIST_FOREACH(footer_tokens, directory_token_t *, t, token_clear(t));
+    smartlist_free(footer_tokens);
+  }
+  if (area) {
+    DUMP_AREA(area, "v3 networkstatus");
+    memarea_drop_all(area);
+  }
+  if (rs_area) memarea_drop_all(rs_area);
   tor_free(last_kwd);
 
   return ns;
